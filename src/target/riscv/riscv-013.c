@@ -1940,37 +1940,6 @@ static void log_memory_access(target_addr_t address, uint64_t value,
 	LOG_DEBUG(fmt, value);
 }
 
-/* Read the relevant sbdata regs depending on size, and put the results into
- * buffer. */
-static int read_memory_bus_word(struct target *target, target_addr_t address,
-		uint32_t size, uint8_t *buffer)
-{
-	uint32_t value;
-	if (size > 12) {
-		if (dmi_read(target, &value, DMI_SBDATA3) != ERROR_OK)
-			return ERROR_FAIL;
-		write_to_buf(buffer + 12, value, 4);
-		log_memory_access(address + 12, value, 4, true);
-	}
-	if (size > 8) {
-		if (dmi_read(target, &value, DMI_SBDATA2) != ERROR_OK)
-			return ERROR_FAIL;
-		write_to_buf(buffer + 8, value, 4);
-		log_memory_access(address + 8, value, 4, true);
-	}
-	if (size > 4) {
-		if (dmi_read(target, &value, DMI_SBDATA1) != ERROR_OK)
-			return ERROR_FAIL;
-		write_to_buf(buffer + 4, value, 4);
-		log_memory_access(address + 4, value, 4, true);
-	}
-	if (dmi_read(target, &value, DMI_SBDATA0) != ERROR_OK)
-		return ERROR_FAIL;
-	write_to_buf(buffer, value, MIN(size, 4));
-	log_memory_access(address, value, MIN(size, 4), true);
-	return ERROR_OK;
-}
-
 static uint32_t sb_sbaccess(unsigned size_bytes)
 {
 	switch (size_bytes) {
@@ -2023,6 +1992,21 @@ static int sb_write_address(struct target *target, target_addr_t address)
 		dmi_write(target, DMI_SBADDRESS1, 0);
 #endif
 	return dmi_write(target, DMI_SBADDRESS0, address);
+}
+
+static int batch_run(const struct target *target, struct riscv_batch *batch)
+{
+	RISCV013_INFO(info);
+	RISCV_INFO(r);
+	if (r->reset_delays_wait >= 0) {
+		r->reset_delays_wait -= batch->used_scans;
+		if (r->reset_delays_wait <= 0) {
+			batch->idle_count = 0;
+			info->dmi_busy_delay = 0;
+			info->ac_busy_delay = 21;
+		}
+	}
+	return riscv_batch_run(batch);
 }
 
 static int read_sbcs_nonbusy(struct target *target, uint32_t *sbcs)
@@ -2126,46 +2110,127 @@ static int read_memory_bus_v1(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, uint8_t *buffer)
 {
 	RISCV013_INFO(info);
+
+	uint32_t sbcs = sb_sbaccess(size);
+	sbcs = set_field(sbcs, DMI_SBCS_SBREADONADDR, 1);
+	sbcs = set_field(sbcs, DMI_SBCS_SBAUTOINCREMENT, 1);
+	sbcs = set_field(sbcs, DMI_SBCS_SBREADONDATA, count > 1);
+	dmi_write(target, DMI_SBCS, sbcs);
+
 	target_addr_t next_address = address;
 	target_addr_t end_address = address + count * size;
+	target_addr_t recv_address;
+
+	/* This address write will trigger the first read. */
+	sb_write_address(target, next_address);
 
 	while (next_address < end_address) {
-		uint32_t sbcs = set_field(0, DMI_SBCS_SBREADONADDR, 1);
-		sbcs |= sb_sbaccess(size);
-		sbcs = set_field(sbcs, DMI_SBCS_SBAUTOINCREMENT, 1);
-		sbcs = set_field(sbcs, DMI_SBCS_SBREADONDATA, count > 1);
-		dmi_write(target, DMI_SBCS, sbcs);
+		int result = ERROR_OK;
+		int batch_full = 0;
+		struct riscv_batch * batch = riscv_batch_alloc(target, 65536, info->dmi_busy_delay + info->bus_master_read_delay);
 
-		/* This address write will trigger the first read. */
-		sb_write_address(target, next_address);
-
-		if (info->bus_master_read_delay) {
-			jtag_add_runtest(info->bus_master_read_delay, TAP_IDLE);
-			if (jtag_execute_queue() != ERROR_OK) {
-				LOG_ERROR("Failed to scan idle sequence");
-				return ERROR_FAIL;
+		size_t reads = 0;
+		recv_address = next_address;
+		for (uint32_t i = (next_address - address) / size; i < count; i++) {
+			if (riscv_batch_full(batch)) {
+				next_address = address + i*size;
+				batch_full = 1;
+				break;
 			}
+
+			/* Read last data */
+			if (i == count-1) {
+				sbcs = set_field(sbcs, DMI_SBCS_SBREADONDATA, 0);
+				riscv_batch_add_dmi_write(batch, DMI_SBCS, sbcs);
+			}
+
+			if (size > 12) {
+				riscv_batch_add_dmi_read(batch, DMI_SBDATA3);
+			}
+			if (size > 8) {
+				riscv_batch_add_dmi_read(batch, DMI_SBDATA2);
+			}
+			if (size > 4) {
+				riscv_batch_add_dmi_read(batch, DMI_SBDATA1);
+			}
+			riscv_batch_add_dmi_read(batch, DMI_SBDATA0);
+			reads++;
 		}
 
-		for (uint32_t i = (next_address - address) / size; i < count - 1; i++) {
-			read_memory_bus_word(target, address + i * size, size,
-					buffer + i * size);
-		}
-
-		sbcs = set_field(sbcs, DMI_SBCS_SBREADONDATA, 0);
-		dmi_write(target, DMI_SBCS, sbcs);
-
-		read_memory_bus_word(target, address + (count - 1) * size, size,
-				buffer + (count - 1) * size);
-
-		if (read_sbcs_nonbusy(target, &sbcs) != ERROR_OK)
+		result = batch_run(target, batch);
+		if (result != ERROR_OK) {
+			riscv_batch_free(batch);
 			return ERROR_FAIL;
+		}
+
+		if (read_sbcs_nonbusy(target, &sbcs) != ERROR_OK) {
+			riscv_batch_free(batch);
+			return ERROR_FAIL;
+		}
 
 		if (get_field(sbcs, DMI_SBCS_SBBUSYERROR)) {
 			/* We read while the target was busy. Slow down and try again. */
 			dmi_write(target, DMI_SBCS, DMI_SBCS_SBBUSYERROR);
 			next_address = sb_read_address(target);
 			info->bus_master_read_delay += info->bus_master_read_delay / 10 + 1;
+			riscv_batch_free(batch);
+			continue;
+		}
+
+		/* Now read whatever we got out of the batch */
+		size_t read_sub = (size+3)/4;
+		dmi_status_t status = DMI_STATUS_SUCCESS;
+		for (size_t i = 0; i < reads; i++) {
+			target_addr_t log_address = recv_address + i * size;
+			riscv_addr_t offset = log_address - address;
+
+			if (size > 12) {
+				uint64_t dmi_out = riscv_batch_get_dmi_read(batch, i*read_sub + (read_sub-4));
+				status = get_field(dmi_out, DTM_DMI_OP);
+				if (status != DMI_STATUS_SUCCESS) {
+					riscv_batch_free(batch);
+					return ERROR_FAIL;
+				}
+				uint32_t value = get_field(dmi_out, DTM_DMI_DATA);
+				write_to_buf(buffer + offset + 12, value, 4);
+				log_memory_access(log_address + 12, value, 4, true);
+			}
+			if (size > 8) {
+				uint64_t dmi_out = riscv_batch_get_dmi_read(batch, i*read_sub + (read_sub-3));
+				status = get_field(dmi_out, DTM_DMI_OP);
+				if (status != DMI_STATUS_SUCCESS) {
+					riscv_batch_free(batch);
+					return ERROR_FAIL;
+				}
+				uint32_t value = get_field(dmi_out, DTM_DMI_DATA);
+				write_to_buf(buffer + offset + 8, value, 4);
+				log_memory_access(log_address + 8, value, 4, true);
+			}
+			if (size > 4) {
+				uint64_t dmi_out = riscv_batch_get_dmi_read(batch, i*read_sub + (read_sub-2));
+				status = get_field(dmi_out, DTM_DMI_OP);
+				if (status != DMI_STATUS_SUCCESS) {
+					riscv_batch_free(batch);
+					return ERROR_FAIL;
+				}
+				uint32_t value = get_field(dmi_out, DTM_DMI_DATA);
+				write_to_buf(buffer + offset + 4, value, 4);
+				log_memory_access(log_address + 4, value, 4, true);
+			}
+
+			uint64_t dmi_out = riscv_batch_get_dmi_read(batch, i*read_sub + (read_sub-1));
+			status = get_field(dmi_out, DTM_DMI_OP);
+			if (status != DMI_STATUS_SUCCESS) {
+				riscv_batch_free(batch);
+				return ERROR_FAIL;
+			}
+			uint32_t value = get_field(dmi_out, DTM_DMI_DATA);
+			write_to_buf(buffer + offset, value, MIN(size,4));
+			log_memory_access(log_address, value, MIN(size,4), true);
+		}
+
+		riscv_batch_free(batch);
+		if (batch_full) {
 			continue;
 		}
 
@@ -2181,21 +2246,6 @@ static int read_memory_bus_v1(struct target *target, target_addr_t address,
 	}
 
 	return ERROR_OK;
-}
-
-static int batch_run(const struct target *target, struct riscv_batch *batch)
-{
-	RISCV013_INFO(info);
-	RISCV_INFO(r);
-	if (r->reset_delays_wait >= 0) {
-		r->reset_delays_wait -= batch->used_scans;
-		if (r->reset_delays_wait <= 0) {
-			batch->idle_count = 0;
-			info->dmi_busy_delay = 0;
-			info->ac_busy_delay = 21;
-		}
-	}
-	return riscv_batch_run(batch);
 }
 
 /**
@@ -2611,23 +2661,34 @@ static int write_memory_bus_v1(struct target *target, target_addr_t address,
 	target_addr_t end_address = address + count * size;
 
 	sb_write_address(target, next_address);
+
 	while (next_address < end_address) {
+		int result = ERROR_OK;
+		int batch_full = 0;
+		struct riscv_batch *batch = riscv_batch_alloc(target, 65536, info->dmi_busy_delay + info->bus_master_write_delay);
+
 		for (uint32_t i = (next_address - address) / size; i < count; i++) {
+			if (riscv_batch_full(batch)) {
+				batch_full = 1;
+				next_address = address + i*size;
+				break;
+			}
+
 			const uint8_t *p = buffer + i * size;
 			if (size > 12)
-				dmi_write(target, DMI_SBDATA3,
+				riscv_batch_add_dmi_write(batch, DMI_SBDATA3,
 						((uint32_t) p[12]) |
 						(((uint32_t) p[13]) << 8) |
 						(((uint32_t) p[14]) << 16) |
 						(((uint32_t) p[15]) << 24));
 			if (size > 8)
-				dmi_write(target, DMI_SBDATA2,
+				riscv_batch_add_dmi_write(batch, DMI_SBDATA2,
 						((uint32_t) p[8]) |
 						(((uint32_t) p[9]) << 8) |
 						(((uint32_t) p[10]) << 16) |
 						(((uint32_t) p[11]) << 24));
 			if (size > 4)
-				dmi_write(target, DMI_SBDATA1,
+				riscv_batch_add_dmi_write(batch, DMI_SBDATA1,
 						((uint32_t) p[4]) |
 						(((uint32_t) p[5]) << 8) |
 						(((uint32_t) p[6]) << 16) |
@@ -2639,18 +2700,15 @@ static int write_memory_bus_v1(struct target *target, target_addr_t address,
 			}
 			if (size > 1)
 				value |= ((uint32_t) p[1]) << 8;
-			dmi_write(target, DMI_SBDATA0, value);
+			riscv_batch_add_dmi_write(batch, DMI_SBDATA0, value);
 
 			log_memory_access(address + i * size, value, size, false);
-
-			if (info->bus_master_write_delay) {
-				jtag_add_runtest(info->bus_master_write_delay, TAP_IDLE);
-				if (jtag_execute_queue() != ERROR_OK) {
-					LOG_ERROR("Failed to scan idle sequence");
-					return ERROR_FAIL;
-				}
-			}
 		}
+
+		result = batch_run(target, batch);
+		riscv_batch_free(batch);
+		if (result != ERROR_OK)
+			return ERROR_FAIL;
 
 		if (read_sbcs_nonbusy(target, &sbcs) != ERROR_OK)
 			return ERROR_FAIL;
@@ -2660,6 +2718,10 @@ static int write_memory_bus_v1(struct target *target, target_addr_t address,
 			dmi_write(target, DMI_SBCS, DMI_SBCS_SBBUSYERROR);
 			next_address = sb_read_address(target);
 			info->bus_master_write_delay += info->bus_master_write_delay / 10 + 1;
+			continue;
+		}
+
+		if (batch_full) {
 			continue;
 		}
 

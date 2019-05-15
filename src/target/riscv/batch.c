@@ -13,7 +13,7 @@ static void dump_field(int idle, const struct scan_field *field);
 
 struct riscv_batch *riscv_batch_alloc(struct target *target, size_t scans, size_t idle)
 {
-	scans += 4;
+	scans += 20;
 	struct riscv_batch *out = calloc(1, sizeof(*out));
 	out->target = target;
 	out->allocated_scans = scans;
@@ -36,7 +36,7 @@ void riscv_batch_free(struct riscv_batch *batch)
 
 bool riscv_batch_full(struct riscv_batch *batch)
 {
-	return batch->used_scans > (batch->allocated_scans - 4);
+	return batch->used_scans > (batch->allocated_scans - 20);
 }
 
 int riscv_batch_run(struct riscv_batch *batch)
