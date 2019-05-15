@@ -2189,9 +2189,9 @@ static int target_write_buffer_default(struct target *target,
 {
 	uint32_t size;
 
-	/* Align up to maximum 4 bytes. The loop condition makes sure the next pass
+	/* Align up to maximum 16 bytes. The loop condition makes sure the next pass
 	 * will have something to do with the size we leave to it. */
-	for (size = 1; size < 4 && count >= size * 2 + (address & size); size *= 2) {
+	for (size = 1; size < 16 && count >= size * 2 + (address & size); size *= 2) {
 		if (address & size) {
 			int retval = target_write_memory(target, address, size, 1, buffer);
 			if (retval != ERROR_OK)
@@ -2250,9 +2250,9 @@ static int target_read_buffer_default(struct target *target, target_addr_t addre
 {
 	uint32_t size;
 
-	/* Align up to maximum 4 bytes. The loop condition makes sure the next pass
+	/* Align up to maximum 16 bytes. The loop condition makes sure the next pass
 	 * will have something to do with the size we leave to it. */
-	for (size = 1; size < 4 && count >= size * 2 + (address & size); size *= 2) {
+	for (size = 1; size < 16 && count >= size * 2 + (address & size); size *= 2) {
 		if (address & size) {
 			int retval = target_read_memory(target, address, size, 1, buffer);
 			if (retval != ERROR_OK)
