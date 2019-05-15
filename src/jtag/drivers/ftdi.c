@@ -403,7 +403,19 @@ static void ftdi_execute_runtest(struct jtag_command *cmd)
 	while (i > 0) {
 		/* there are no state transitions in this code, so omit state tracking */
 		unsigned this_len = i > 7 ? 7 : i;
-		DO_CLOCK_TMS_CS_OUT(mpsse_ctx, &zero, 0, this_len, false, ftdi_jtag_mode);
+		if ((this_len<=4) && (cmd->cmd.runtest->end_state==TAP_DRSHIFT)) {
+			uint8_t tms_bits = 0x01 << this_len;
+			DO_CLOCK_TMS_CS_OUT(mpsse_ctx, &tms_bits, 0, this_len+3, false, ftdi_jtag_mode);
+			tap_set_state(TAP_DRSHIFT);
+		}
+		else if ((this_len<=3) && (cmd->cmd.runtest->end_state==TAP_IRSHIFT)) {
+			uint8_t tms_bits = 0x03 << this_len;
+			DO_CLOCK_TMS_CS_OUT(mpsse_ctx, &tms_bits, 0, this_len+4, false, ftdi_jtag_mode);
+			tap_set_state(TAP_IRSHIFT);
+		}
+		else {
+			DO_CLOCK_TMS_CS_OUT(mpsse_ctx, &zero, 0, this_len, false, ftdi_jtag_mode);
+		}
 		i -= this_len;
 	}
 
@@ -549,23 +561,34 @@ static void ftdi_execute_scan(struct jtag_command *cmd)
 			uint8_t last_bit = 0;
 			if (field->out_value)
 				bit_copy(&last_bit, 0, field->out_value, field->num_bits - 1, 1);
-			uint8_t tms_bits = 0x01;
-			DO_CLOCK_TMS_CS(mpsse_ctx,
-					&tms_bits,
-					0,
-					field->in_value,
-					field->num_bits - 1,
-					1,
-					last_bit,
-					ftdi_jtag_mode);
-			tap_set_state(tap_state_transition(tap_get_state(), 1));
-			DO_CLOCK_TMS_CS_OUT(mpsse_ctx,
-					&tms_bits,
-					1,
-					1,
-					last_bit,
-					ftdi_jtag_mode);
-			tap_set_state(tap_state_transition(tap_get_state(), 0));
+			if (tap_get_end_state() == TAP_IDLE) {
+				uint8_t tms_bits = 0x03;
+				DO_CLOCK_TMS_CS_OUT(mpsse_ctx,
+						&tms_bits,
+						0,
+						7,		// EXIT1-DR/UPDATE-DR/RUN-TEST-IDLE, idle 4 cycles for RISC-V DTM
+						last_bit,
+						ftdi_jtag_mode);
+				tap_set_state(TAP_IDLE);
+			} else {
+				uint8_t tms_bits = 0x01;
+				DO_CLOCK_TMS_CS(mpsse_ctx,
+						&tms_bits,
+						0,
+						field->in_value,
+						field->num_bits - 1,
+						1,
+						last_bit,
+						ftdi_jtag_mode);
+				tap_set_state(tap_state_transition(tap_get_state(), 1));
+				DO_CLOCK_TMS_CS_OUT(mpsse_ctx,
+						&tms_bits,
+						1,
+						1,
+						last_bit,
+						ftdi_jtag_mode);
+				tap_set_state(tap_state_transition(tap_get_state(), 0));
+			}
 		} else
 			DO_CLOCK_DATA(mpsse_ctx,
 				field->out_value,

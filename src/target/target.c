@@ -3503,6 +3503,7 @@ COMMAND_HANDLER(handle_dump_image_command)
 	target_addr_t address, size;
 	struct duration bench;
 	struct target *target = get_current_target(CMD_CTX);
+	int first_run = 1;
 
 	if (CMD_ARGC != 3)
 		return ERROR_COMMAND_SYNTAX_ERROR;
@@ -3510,7 +3511,7 @@ COMMAND_HANDLER(handle_dump_image_command)
 	COMMAND_PARSE_ADDRESS(CMD_ARGV[1], address);
 	COMMAND_PARSE_ADDRESS(CMD_ARGV[2], size);
 
-	uint32_t buf_size = (size > 4096) ? 4096 : size;
+	uint32_t buf_size = (size > 65536) ? 65536 : size;
 	buffer = malloc(buf_size);
 	if (!buffer)
 		return ERROR_FAIL;
@@ -3526,6 +3527,12 @@ COMMAND_HANDLER(handle_dump_image_command)
 	while (size > 0) {
 		size_t size_written;
 		uint32_t this_run_size = (size > buf_size) ? buf_size : size;
+
+		if (first_run && (size>buf_size)) {
+			this_run_size = this_run_size - ((address+this_run_size) % 16);		// 16byte align of next address
+		}
+		first_run = 0;
+
 		retval = target_read_buffer(target, address, this_run_size, buffer);
 		if (retval != ERROR_OK)
 			break;

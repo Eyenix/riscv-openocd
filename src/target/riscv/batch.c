@@ -52,8 +52,15 @@ int riscv_batch_run(struct riscv_batch *batch)
 
 	for (size_t i = 0; i < batch->used_scans; ++i) {
 		jtag_add_dr_scan(batch->target->tap, 1, batch->fields + i, TAP_IDLE);
-		if (batch->idle_count > 0)
-			jtag_add_runtest(batch->idle_count, TAP_IDLE);
+
+		if (i == batch->used_scans-1) {
+			if (batch->idle_count > 0)
+				jtag_add_runtest(batch->idle_count, TAP_IDLE);
+		}
+		else {
+			if (batch->idle_count > 0)
+				jtag_add_runtest(batch->idle_count, TAP_DRSHIFT);
+		}
 	}
 
 	if (jtag_execute_queue() != ERROR_OK) {
