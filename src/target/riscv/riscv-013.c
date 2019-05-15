@@ -483,7 +483,7 @@ static dmi_status_t dmi_scan(struct target *target, uint32_t *address_in,
 		r->reset_delays_wait--;
 		if (r->reset_delays_wait < 0) {
 			info->dmi_busy_delay = 0;
-			info->ac_busy_delay = 0;
+			info->ac_busy_delay = 21;
 		}
 	}
 
@@ -1732,7 +1732,7 @@ static int init_target(struct command_context *cmd_ctx,
 	info->dmi_busy_delay = 0;
 	info->bus_master_read_delay = 0;
 	info->bus_master_write_delay = 0;
-	info->ac_busy_delay = 0;
+	info->ac_busy_delay = 21;
 
 	/* Assume all these abstract commands are supported until we learn
 	 * otherwise.
@@ -2192,7 +2192,7 @@ static int batch_run(const struct target *target, struct riscv_batch *batch)
 		if (r->reset_delays_wait <= 0) {
 			batch->idle_count = 0;
 			info->dmi_busy_delay = 0;
-			info->ac_busy_delay = 0;
+			info->ac_busy_delay = 21;
 		}
 	}
 	return riscv_batch_run(batch);
@@ -2257,7 +2257,7 @@ static int read_memory_progbuf_inner(struct target *target, target_addr_t addres
 		LOG_DEBUG("creating burst to read from 0x%" PRIx64
 				" up to 0x%" PRIx64, read_addr, fin_addr);
 		assert(read_addr >= address && read_addr < fin_addr);
-		struct riscv_batch *batch = riscv_batch_alloc(target, 32,
+		struct riscv_batch *batch = riscv_batch_alloc(target, 65536,
 				info->dmi_busy_delay + info->ac_busy_delay);
 
 		size_t reads = 0;
@@ -2734,7 +2734,7 @@ static int write_memory_progbuf(struct target *target, target_addr_t address,
 
 		struct riscv_batch *batch = riscv_batch_alloc(
 				target,
-				32,
+				65536,
 				info->dmi_busy_delay + info->ac_busy_delay);
 
 		/* To write another word, we put it in S1 and execute the program. */
