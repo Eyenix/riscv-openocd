@@ -2062,8 +2062,11 @@ static int read_memory_bus_v1(struct target *target, target_addr_t address,
 				riscv_batch_add_dmi_read(batch, DMI_SBDATA1);
 			}
 			riscv_batch_add_dmi_read(batch, DMI_SBDATA0);
+
 			reads++;
 		}
+
+		riscv_batch_add_nop(batch);
 
 		result = batch_run(target, batch);
 		if (result != ERROR_OK) {
