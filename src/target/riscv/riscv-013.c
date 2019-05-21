@@ -2029,15 +2029,11 @@ static int read_memory_bus_v1(struct target *target, target_addr_t address,
 	sbcs = set_field(sbcs, DMI_SBCS_SBAUTOINCREMENT, 1);
 	sbcs = set_field(sbcs, DMI_SBCS_SBREADONDATA, count > 1);
 	dmi_write(target, DMI_SBCS, sbcs);
-
 	
 	/* This address write will trigger the first read. */
 	sb_write_address(target, next_address);
 
-
 	while (next_address < end_address) {
-
-			
 		int result = ERROR_OK;
 		int batch_full = 0;
 		struct riscv_batch * batch = riscv_batch_alloc(target, 1024*4, info->dmi_busy_delay + info->bus_master_read_delay);
@@ -2054,6 +2050,7 @@ static int read_memory_bus_v1(struct target *target, target_addr_t address,
 			/* Read last data */
 			if (i == count-1) {
 				sbcs = set_field(sbcs, DMI_SBCS_SBREADONDATA, 0);
+				sbcs = set_field(sbcs, DMI_SBCS_SBBUSYERROR, 0);
 				riscv_batch_add_dmi_write(batch, DMI_SBCS, sbcs);
 			}
 
@@ -2079,85 +2076,78 @@ static int read_memory_bus_v1(struct target *target, target_addr_t address,
 			return ERROR_FAIL;
 		}
 
-
 		/* Now read whatever we got out of the batch */
-			size_t read_sub = (size+3)/4;
-			dmi_status_t status = DMI_STATUS_SUCCESS;
-			for (size_t i = 0; i < reads; i++) {
-				target_addr_t log_address = recv_address + i * size;
-				riscv_addr_t offset = log_address - address;
-		
-				if (size > 12) {
-					uint64_t dmi_out = riscv_batch_get_dmi_read(batch, i*read_sub + (read_sub-4));
-					status = get_field(dmi_out, DTM_DMI_OP);
-					if (status != DMI_STATUS_SUCCESS) {
-						riscv_batch_free(batch);
-						return ERROR_FAIL;
-					}
-					uint32_t value = get_field(dmi_out, DTM_DMI_DATA);
-					write_to_buf(buffer + offset + 12, value, 4);
-					log_memory_access(log_address + 12, value, 4, true);
-				}
-				if (size > 8) {
-					uint64_t dmi_out = riscv_batch_get_dmi_read(batch, i*read_sub + (read_sub-3));
-					status = get_field(dmi_out, DTM_DMI_OP);
-					if (status != DMI_STATUS_SUCCESS) {
-						riscv_batch_free(batch);
-						return ERROR_FAIL;
-					}
-					uint32_t value = get_field(dmi_out, DTM_DMI_DATA);
-					write_to_buf(buffer + offset + 8, value, 4);
-					log_memory_access(log_address + 8, value, 4, true);
-				}
-				if (size > 4) {
-					uint64_t dmi_out = riscv_batch_get_dmi_read(batch, i*read_sub + (read_sub-2));
-					status = get_field(dmi_out, DTM_DMI_OP);
-					if (status != DMI_STATUS_SUCCESS) {
-						riscv_batch_free(batch);
-						return ERROR_FAIL;
-					}
-					uint32_t value = get_field(dmi_out, DTM_DMI_DATA);
-					write_to_buf(buffer + offset + 4, value, 4);
-					log_memory_access(log_address + 4, value, 4, true);
-		
-					//if(i == reads-1) break;
-					
-				}
-		
-				uint64_t dmi_out = riscv_batch_get_dmi_read(batch, i*read_sub + (read_sub-1));
+		size_t read_sub = (size+3)/4;
+		dmi_status_t status = DMI_STATUS_SUCCESS;
+		for (size_t i = 0; i < reads; i++) {
+			target_addr_t log_address = recv_address + i * size;
+			riscv_addr_t offset = log_address - address;
+	
+			if (size > 12) {
+				uint64_t dmi_out = riscv_batch_get_dmi_read(batch, i*read_sub + (read_sub-4));
 				status = get_field(dmi_out, DTM_DMI_OP);
 				if (status != DMI_STATUS_SUCCESS) {
 					riscv_batch_free(batch);
 					return ERROR_FAIL;
 				}
 				uint32_t value = get_field(dmi_out, DTM_DMI_DATA);
-				write_to_buf(buffer + offset, value, MIN(size,4));
-				log_memory_access(log_address, value, MIN(size,4), true);
+				write_to_buf(buffer + offset + 12, value, 4);
+				log_memory_access(log_address + 12, value, 4, true);
 			}
-
+			if (size > 8) {
+				uint64_t dmi_out = riscv_batch_get_dmi_read(batch, i*read_sub + (read_sub-3));
+				status = get_field(dmi_out, DTM_DMI_OP);
+				if (status != DMI_STATUS_SUCCESS) {
+					riscv_batch_free(batch);
+					return ERROR_FAIL;
+				}
+				uint32_t value = get_field(dmi_out, DTM_DMI_DATA);
+				write_to_buf(buffer + offset + 8, value, 4);
+				log_memory_access(log_address + 8, value, 4, true);
+			}
+			if (size > 4) {
+				uint64_t dmi_out = riscv_batch_get_dmi_read(batch, i*read_sub + (read_sub-2));
+				status = get_field(dmi_out, DTM_DMI_OP);
+				if (status != DMI_STATUS_SUCCESS) {
+					riscv_batch_free(batch);
+					return ERROR_FAIL;
+				}
+				uint32_t value = get_field(dmi_out, DTM_DMI_DATA);
+				write_to_buf(buffer + offset + 4, value, 4);
+				log_memory_access(log_address + 4, value, 4, true);
+			}
+	
+			uint64_t dmi_out = riscv_batch_get_dmi_read(batch, i*read_sub + (read_sub-1));
+			status = get_field(dmi_out, DTM_DMI_OP);
+			if (status != DMI_STATUS_SUCCESS) {
+				riscv_batch_free(batch);
+				return ERROR_FAIL;
+			}
+			uint32_t value = get_field(dmi_out, DTM_DMI_DATA);
+			write_to_buf(buffer + offset, value, MIN(size,4));
+			log_memory_access(log_address, value, MIN(size,4), true);
+		}
+		riscv_batch_free(batch);
 
 		if (read_sbcs_nonbusy(target, &sbcs) != ERROR_OK) {
-			riscv_batch_free(batch);
 			return ERROR_FAIL;
 		}
 
 		if (get_field(sbcs, DMI_SBCS_SBBUSYERROR)) {
+			LOG_ERROR("read bus busy :next_address %08llx",next_address);
 			/* We read while the target was busy. Slow down and try again. */
+			sbcs = set_field(sbcs, DMI_SBCS_SBREADONDATA, 1);
 			sbcs = set_field(sbcs, DMI_SBCS_SBBUSYERROR, 1);
 			dmi_write(target, DMI_SBCS, sbcs);
-			sb_write_address(target, next_address);
-			LOG_ERROR("read bus busy :next_address %08x",next_address);
-		//	next_address = sb_read_address(target);
+			next_address = sb_read_address(target) - size;
+			if (next_address < address) next_address = address;
+			sb_write_address(target, next_address);	// This address write will trigger the first read.
 			//info->bus_master_read_delay += info->bus_master_read_delay / 10 + 1;
-			riscv_batch_free(batch);
 			continue;
-		}else{
+		} else {
 			next_address = temp_address;	// next_address update
 		}
 
-	
-
-		riscv_batch_free(batch);
 		if (batch_full) {
 			continue;
 		}
@@ -2189,7 +2179,6 @@ static int write_memory_bus_v1(struct target *target, target_addr_t address,
 	uint32_t sbcs = sb_sbaccess(size);
 	sbcs = set_field(sbcs, DMI_SBCS_SBAUTOINCREMENT, 1);
 	dmi_write(target, DMI_SBCS, sbcs);
-
 	
 	target_addr_t next_address = address;
 	target_addr_t end_address = address + count * size;
@@ -2197,10 +2186,7 @@ static int write_memory_bus_v1(struct target *target, target_addr_t address,
 
 	sb_write_address(target, next_address);
 
-	
-
 	while (next_address < end_address) {
-
 		int result = ERROR_OK;
 		int batch_full = 0;
 		struct riscv_batch *batch = riscv_batch_alloc(target, 1024*4, info->dmi_busy_delay + info->bus_master_write_delay);
@@ -2208,7 +2194,6 @@ static int write_memory_bus_v1(struct target *target, target_addr_t address,
 		for (uint32_t i = (next_address - address) / size; i < count; i++) {
 			if (riscv_batch_full(batch)) {
 				batch_full = 1;
-				
 				temp_address = address + i*size;
 				break;
 			}
@@ -2249,20 +2234,20 @@ static int write_memory_bus_v1(struct target *target, target_addr_t address,
 		if (result != ERROR_OK)
 			return ERROR_FAIL;
 
-		if (read_sbcs_nonbusy(target, &sbcs) != ERROR_OK)
+		if (read_sbcs_nonbusy(target, &sbcs) != ERROR_OK) {
 			return ERROR_FAIL;
+		}
 
 		if (get_field(sbcs, DMI_SBCS_SBBUSYERROR)) {
-			LOG_ERROR("write bus busy :next_address %08x",next_address);
+			LOG_ERROR("write bus busy :next_address %08llx",next_address);
 			/* We wrote while the target was busy. Slow down and try again. */
 			sbcs = set_field(sbcs, DMI_SBCS_SBBUSYERROR, 1);
 			dmi_write(target, DMI_SBCS, sbcs);
-			sb_write_address(target, next_address);
-		//	next_address = sb_read_address(target);
-		//	info->bus_master_write_delay += info->bus_master_write_delay / 10 + 1;
+			next_address = sb_read_address(target);
+			//info->bus_master_write_delay += info->bus_master_write_delay / 10 + 1;
 			continue;
-		}else{
-			next_address = temp_address;
+		} else {
+			next_address = temp_address;	// next_address update
 		}
 
 		if (batch_full) {
