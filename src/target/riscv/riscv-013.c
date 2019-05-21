@@ -2243,7 +2243,9 @@ static int write_memory_bus_v1(struct target *target, target_addr_t address,
 			/* We wrote while the target was busy. Slow down and try again. */
 			sbcs = set_field(sbcs, DMI_SBCS_SBBUSYERROR, 1);
 			dmi_write(target, DMI_SBCS, sbcs);
-			next_address = sb_read_address(target);
+			next_address = sb_read_address(target) - size;
+			if (next_address < address) next_address = address;
+			sb_write_address(target, next_address);
 			//info->bus_master_write_delay += info->bus_master_write_delay / 10 + 1;
 			continue;
 		} else {
