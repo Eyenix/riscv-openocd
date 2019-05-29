@@ -225,6 +225,8 @@ int riscv_reset_timeout_sec = DEFAULT_RESET_TIMEOUT_SEC;
 
 bool riscv_prefer_sba;
 
+bool riscv_print_rw_info;
+
 typedef struct {
 	uint16_t low, high;
 } range_t;
@@ -1684,6 +1686,16 @@ COMMAND_HANDLER(riscv_set_prefer_sba)
 	return ERROR_OK;
 }
 
+COMMAND_HANDLER(riscv_set_print_rw_info)
+{
+	if (CMD_ARGC != 1) {
+		LOG_ERROR("Command takes exactly 1 parameter");
+		return ERROR_COMMAND_SYNTAX_ERROR;
+	}
+	COMMAND_PARSE_ON_OFF(CMD_ARGV[0], riscv_print_rw_info);
+	return ERROR_OK;
+}
+
 void parse_error(const char *string, char c, unsigned position)
 {
 	char buf[position+2];
@@ -2006,6 +2018,14 @@ static const struct command_registration riscv_exec_command_handlers[] = {
 		.usage = "riscv set_prefer_sba on|off",
 		.help = "When on, prefer to use System Bus Access to access memory. "
 			"When off, prefer to use the Program Buffer to access memory."
+	},
+	{
+		.name = "set_print_rw_info",
+		.handler = riscv_set_print_rw_info,
+		.mode = COMMAND_ANY,
+		.usage = "riscv set_print_rw_info on|off",
+		.help = "When on, print read/write_memory information. "
+			"When off, do not print read/write_memory information."
 	},
 	{
 		.name = "expose_csrs",

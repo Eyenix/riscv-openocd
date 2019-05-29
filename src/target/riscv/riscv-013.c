@@ -2540,6 +2540,10 @@ static int read_memory(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, uint8_t *buffer)
 {
 	RISCV013_INFO(info);
+
+	if (riscv_print_rw_info)
+		LOG_INFO("read_memory address=0x%llx, size=%d, count=%d", address, size, count);
+
 	if (info->progbufsize >= 2 && !riscv_prefer_sba)
 		return read_memory_progbuf(target, address, size, count, buffer);
 
@@ -2925,6 +2929,10 @@ static int write_memory(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, const uint8_t *buffer)
 {
 	RISCV013_INFO(info);
+
+	if (riscv_print_rw_info)
+		LOG_INFO("write_memory address=0x%llx, size=%d, count=%d", address, size, count);
+
 	if (info->progbufsize >= 2 && !riscv_prefer_sba)
 		return write_memory_progbuf(target, address, size, count, buffer);
 

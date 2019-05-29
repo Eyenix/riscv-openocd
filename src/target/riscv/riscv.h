@@ -151,6 +151,7 @@ extern int riscv_command_timeout_sec;
 extern int riscv_reset_timeout_sec;
 
 extern bool riscv_prefer_sba;
+extern bool riscv_print_rw_info;
 
 /* Everything needs the RISC-V specific info structure, so here's a nice macro
  * that provides that. */
