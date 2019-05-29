@@ -2168,6 +2168,9 @@ static int read_memory_bus_v1(struct target *target, target_addr_t address,
 static int read_memory(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, uint8_t *buffer)
 {
+	if (riscv_print_rw_info)
+		LOG_INFO("read_memory address=0x%llx, size=%d, count=%d", address, size, count);
+
 	return read_memory_bus_v1(target, address, size, count, buffer);
 }
 
@@ -2273,6 +2276,9 @@ static int write_memory_bus_v1(struct target *target, target_addr_t address,
 static int write_memory(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, const uint8_t *buffer)
 {
+	if (riscv_print_rw_info)
+		LOG_INFO("write_memory address=0x%llx, size=%d, count=%d", address, size, count);
+
 	return write_memory_bus_v1(target, address, size, count, buffer);
 }
 
