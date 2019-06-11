@@ -2142,7 +2142,7 @@ static int read_memory_bus_v1(struct target *target, target_addr_t address,
 			next_address = sb_read_address(target) - size;
 			if (next_address < address) next_address = address;
 			sb_write_address(target, next_address);	// This address write will trigger the first read.
-			//info->bus_master_read_delay += info->bus_master_read_delay / 10 + 1;
+			info->bus_master_read_delay += info->bus_master_read_delay / 10 + 1;
 			continue;
 		} else {
 			next_address = temp_address;	// next_address update
@@ -2249,7 +2249,7 @@ static int write_memory_bus_v1(struct target *target, target_addr_t address,
 			next_address = sb_read_address(target) - size;
 			if (next_address < address) next_address = address;
 			sb_write_address(target, next_address);
-			//info->bus_master_write_delay += info->bus_master_write_delay / 10 + 1;
+			info->bus_master_write_delay += info->bus_master_write_delay / 10 + 1;
 			continue;
 		} else {
 			next_address = temp_address;	// next_address update
