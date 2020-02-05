@@ -67,7 +67,7 @@ struct target_desc_format {
 
 /* private connection data for GDB */
 struct gdb_connection {
-	char buffer[GDB_BUFFER_SIZE];
+	char buffer[GDB_BUFFER_SIZE + 1]; /* Extra byte for nul-termination */
 	char *buf_p;
 	int buf_cnt;
 	int ctrl_c;
@@ -359,9 +359,7 @@ static int gdb_put_packet_inner(struct connection *connection,
 {
 	int i;
 	unsigned char my_checksum = 0;
-#ifdef _DEBUG_GDB_IO_
 	char *debug_buffer;
-#endif
 	int reply;
 	int retval;
 	struct gdb_connection *gdb_con = connection->priv;
@@ -374,6 +372,8 @@ static int gdb_put_packet_inner(struct connection *connection,
 	 * At this point we should have nothing in the input queue from GDB,
 	 * however sometimes '-' is sent even though we've already received
 	 * an ACK (+) for everything we've sent off.
+	 *
+	 * This code appears to sometimes eat a ^C coming from gdb.
 	 */
 	int gotdata;
 	for (;; ) {
@@ -397,11 +397,9 @@ static int gdb_put_packet_inner(struct connection *connection,
 #endif
 
 	while (1) {
-#ifdef _DEBUG_GDB_IO_
 		debug_buffer = strndup(buffer, len);
 		LOG_DEBUG("sending packet '$%s#%2.2x'", debug_buffer, my_checksum);
 		free(debug_buffer);
-#endif
 
 		char local_buffer[1024];
 		local_buffer[0] = '$';
@@ -738,7 +736,6 @@ static void gdb_signal_reply(struct target *target, struct connection *connectio
 		struct target *ct;
 		if (target->rtos != NULL) {
 			target->rtos->current_threadid = target->rtos->current_thread;
-			LOG_DEBUG("current_threadid=%" PRId64, target->rtos->current_threadid);
 			target->rtos->gdb_target_for_threadid(connection, target->rtos->current_threadid, &ct);
 		} else {
 			ct = target;
@@ -906,7 +903,6 @@ static void gdb_frontend_halted(struct target *target, struct connection *connec
 static int gdb_target_callback_event_handler(struct target *target,
 		enum target_event event, void *priv)
 {
-	int retval;
 	struct connection *connection = priv;
 	struct gdb_service *gdb_service = connection->service->priv;
 
@@ -919,11 +915,6 @@ static int gdb_target_callback_event_handler(struct target *target,
 			break;
 		case TARGET_EVENT_HALTED:
 			target_call_event_callbacks(target, TARGET_EVENT_GDB_END);
-			break;
-		case TARGET_EVENT_GDB_FLASH_ERASE_START:
-			retval = jtag_execute_queue();
-			if (retval != ERROR_OK)
-				return retval;
 			break;
 		default:
 			break;
@@ -1422,8 +1413,6 @@ static int gdb_error(struct connection *connection, int retval)
 
 /* We don't have to worry about the default 2 second timeout for GDB packets,
  * because GDB breaks up large memory reads into smaller reads.
- *
- * 8191 bytes by the looks of it. Why 8191 bytes instead of 8192?????
  */
 static int gdb_read_memory_packet(struct connection *connection,
 		char const *packet, int packet_size)
@@ -1657,7 +1646,7 @@ static int gdb_breakpoint_watchpoint_packet(struct connection *connection,
 	char *separator;
 	int retval;
 
-	LOG_DEBUG("[%d]", target->coreid);
+	LOG_DEBUG("[%s]", target_name(target));
 
 	type = strtoul(packet + 1, &separator, 16);
 
@@ -2207,6 +2196,78 @@ static int get_reg_features_list(struct target *target, char const **feature_lis
 	return ERROR_OK;
 }
 
+/* Create a register list that's the union of all the registers of the SMP
+ * group this target is in. If the target is not part of an SMP group, this
+ * returns the same as target_get_gdb_reg_list_noread().
+ */
+static int smp_reg_list_noread(struct target *target,
+		struct reg **combined_list[], int *combined_list_size,
+		enum target_register_class reg_class)
+{
+	if (!target->smp)
+		return target_get_gdb_reg_list_noread(target, combined_list,
+				combined_list_size, REG_CLASS_ALL);
+
+	int combined_allocated = 256;
+	*combined_list = malloc(combined_allocated * sizeof(struct reg *));
+	if (*combined_list == NULL) {
+		LOG_ERROR("malloc(%d) failed", (int) (combined_allocated * sizeof(struct reg *)));
+		return ERROR_FAIL;
+	}
+	*combined_list_size = 0;
+	struct target_list *head;
+	foreach_smp_target(head, target->head) {
+		struct reg **reg_list = NULL;
+		int reg_list_size;
+		int result = target_get_gdb_reg_list_noread(head->target, &reg_list,
+				&reg_list_size, reg_class);
+		if (result != ERROR_OK) {
+			free(*combined_list);
+			return result;
+		}
+		for (int i = 0; i < reg_list_size; i++) {
+			bool found = false;
+			struct reg *a = reg_list[i];
+			if (a->exist) {
+				/* Nested loop makes this O(n^2), but this entire function with
+				 * 5 RISC-V targets takes just 2ms on my computer. Fast enough
+				 * for me. */
+				for (int j = 0; j < *combined_list_size; j++) {
+					struct reg *b = (*combined_list)[j];
+					if (!strcmp(a->name, b->name)) {
+						found = true;
+						if (a->size != b->size) {
+							LOG_ERROR("SMP register %s is %d bits on one "
+									"target, but %d bits on another target.",
+									a->name, a->size, b->size);
+							free(reg_list);
+							free(*combined_list);
+							return ERROR_FAIL;
+						}
+						break;
+					}
+				}
+				if (!found) {
+					LOG_DEBUG("[%s] %s not found in combined list", target_name(target), a->name);
+					if (*combined_list_size >= combined_allocated) {
+						combined_allocated *= 2;
+						*combined_list = realloc(*combined_list, combined_allocated * sizeof(struct reg *));
+						if (*combined_list == NULL) {
+							LOG_ERROR("realloc(%d) failed", (int) (combined_allocated * sizeof(struct reg *)));
+							return ERROR_FAIL;
+						}
+					}
+					(*combined_list)[*combined_list_size] = a;
+					(*combined_list_size)++;
+				}
+			}
+		}
+		free(reg_list);
+	}
+
+	return ERROR_OK;
+}
+
 static int gdb_generate_target_description(struct target *target, char **tdesc_out)
 {
 	int retval = ERROR_OK;
@@ -2223,8 +2284,8 @@ static int gdb_generate_target_description(struct target *target, char **tdesc_o
 
 	arch_defined_types = calloc(1, sizeof(char *));
 
-	retval = target_get_gdb_reg_list_noread(target, &reg_list,
-			&reg_list_size, REG_CLASS_ALL);
+	retval = smp_reg_list_noread(target, &reg_list, &reg_list_size,
+			REG_CLASS_ALL);
 
 	if (retval != ERROR_OK) {
 		LOG_ERROR("get register list failed");
@@ -2630,7 +2691,7 @@ static int gdb_query_packet(struct connection *connection,
 			&pos,
 			&size,
 			"PacketSize=%x;qXfer:memory-map:read%c;qXfer:features:read%c;qXfer:threads:read+;QStartNoAckMode+;vContSupported+",
-			(GDB_BUFFER_SIZE - 1),
+			GDB_BUFFER_SIZE,
 			((gdb_use_memory_map == 1) && (flash_get_bank_count() > 0)) ? '+' : '-',
 			(gdb_target_desc_supported == 1) ? '+' : '-');
 
@@ -2789,7 +2850,23 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 
 			if (target->rtos != NULL) {
 				/* FIXME: why is this necessary? rtos state should be up-to-date here already! */
-				rtos_update_threads(target);
+
+				/* Sometimes this results in picking a different thread than
+				 * gdb just requested to step. Then we fake it, and now there's
+				 * a different thread selected than gdb expects, so register
+				 * accesses go to the wrong one!
+				 * E.g.:
+				 * Hg1$
+				 * P8=72101ce197869329$		# write r8 on thread 1
+				 * g$
+				 * vCont?$
+				 * vCont;s:1;c$				# rtos_update_threads changes to other thread
+				 * g$
+				 * qXfer:threads:read::0,fff$
+				 * P8=cc060607eb89ca7f$		# write r8 on other thread
+				 * g$
+				 * */
+				/* rtos_update_threads(target); */
 
 				target->rtos->gdb_target_for_threadid(connection, thread_id, &ct);
 
@@ -2797,8 +2874,7 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 				 * check if the thread to be stepped is the current rtos thread
 				 * if not, we must fake the step
 				 */
-				if (target->rtos->current_thread != thread_id)
-					fake_step = true;
+				fake_step = rtos_needs_fake_step(target, thread_id);
 			}
 
 			if (parse[0] == ';') {
@@ -2807,13 +2883,11 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 
 				if (parse[0] == 'c') {
 					parse += 1;
-					packet_size -= 1;
 
 					/* check if thread-id follows */
 					if (parse[0] == ':') {
 						int64_t tid;
 						parse += 1;
-						packet_size -= 1;
 
 						tid = strtoll(parse, &endp, 16);
 						if (tid == thread_id) {
@@ -2838,15 +2912,10 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 			log_add_callback(gdb_log_callback, connection);
 			target_call_event_callbacks(ct, TARGET_EVENT_GDB_START);
 
-			/*
-			 * work around an annoying gdb behaviour: when the current thread
-			 * is changed in gdb, it assumes that the target can follow and also
-			 * make the thread current. This is an assumption that cannot hold
-			 * for a real target running a multi-threading OS. We just fake
-			 * the step to not trigger an internal error in gdb. See
-			 * https://sourceware.org/bugzilla/show_bug.cgi?id=22925 for details
-			 */
 			if (fake_step) {
+				/* We just fake the step to not trigger an internal error in
+				 * gdb. See https://sourceware.org/bugzilla/show_bug.cgi?id=22925
+				 * for details. */
 				int sig_reply_len;
 				char sig_reply[128];
 
@@ -3137,7 +3206,7 @@ static void gdb_sig_halted(struct connection *connection)
 static int gdb_input_inner(struct connection *connection)
 {
 	/* Do not allocate this on the stack */
-	static char gdb_packet_buffer[GDB_BUFFER_SIZE];
+	static char gdb_packet_buffer[GDB_BUFFER_SIZE + 1]; /* Extra byte for nul-termination */
 
 	struct target *target;
 	char const *packet = gdb_packet_buffer;
@@ -3160,7 +3229,7 @@ static int gdb_input_inner(struct connection *connection)
 	 * drain the rest of the buffer.
 	 */
 	do {
-		packet_size = GDB_BUFFER_SIZE-1;
+		packet_size = GDB_BUFFER_SIZE;
 		retval = gdb_get_packet(connection, gdb_packet_buffer, &packet_size);
 		if (retval != ERROR_OK)
 			return retval;
@@ -3169,16 +3238,23 @@ static int gdb_input_inner(struct connection *connection)
 		gdb_packet_buffer[packet_size] = '\0';
 
 		if (LOG_LEVEL_IS(LOG_LVL_DEBUG)) {
-			if (packet[0] == 'X') {
-				/* binary packets spew junk into the debug log stream */
-				char buf[50];
-				int x;
-				for (x = 0; (x < 49) && (packet[x] != ':'); x++)
-					buf[x] = packet[x];
-				buf[x] = 0;
-				LOG_DEBUG("received packet: '%s:<binary-data>'", buf);
-			} else
-				LOG_DEBUG("received packet: '%s'", packet);
+			char buf[64];
+			unsigned offset = 0;
+			int i = 0;
+			while (i < packet_size && offset < 56) {
+				if (packet[i] == '\\') {
+					buf[offset++] = '\\';
+					buf[offset++] = '\\';
+				} else if (isprint(packet[i])) {
+					buf[offset++] = packet[i];
+				} else {
+					sprintf(buf + offset, "\\x%02x", (unsigned char) packet[i]);
+					offset += 4;
+				}
+				i++;
+			}
+			buf[offset] = 0;
+			LOG_DEBUG("received packet: '%s'%s", buf, i < packet_size ? "..." : "");
 		}
 
 		if (packet_size > 0) {
@@ -3514,7 +3590,7 @@ COMMAND_HANDLER(handle_gdb_sync_command)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
 	if (current_gdb_connection == NULL) {
-		command_print(CMD_CTX,
+		command_print(CMD,
 			"gdb_sync command can only be run from within gdb using \"monitor gdb_sync\"");
 		return ERROR_FAIL;
 	}
@@ -3719,6 +3795,7 @@ static const struct command_registration gdb_command_handlers[] = {
 		.handler = handle_gdb_save_tdesc_command,
 		.mode = COMMAND_EXEC,
 		.help = "Save the target description file",
+		.usage = "",
 	},
 	COMMAND_REGISTRATION_DONE
 };
